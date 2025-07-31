@@ -53,6 +53,19 @@ class ConnectionViewModel : ViewModel() {
         data class Error(val message: String) : HostSearchResult()
     }
 
+    fun messageHost(message: String): Boolean {
+        var sent = true
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!connectionManager?.sendHostMessage(message)!!) {
+                withContext(Dispatchers.Main) {
+                    updateConnectionState(false)
+                    sent = false
+                }
+            }
+        }
+        return sent
+    }
+
     // Search for hosts in the background
     fun searchForHosts(message: String = "Hello, I'm"): LiveData<HostSearchResult> {
         val result = MutableLiveData<HostSearchResult>()
@@ -163,9 +176,9 @@ class ConnectionViewModel : ViewModel() {
 
     // Cleanup
     override fun onCleared() {
+        super.onCleared()
         connectionManager?.shutdown()
         updateConnectionState(false)
-        super.onCleared()
     }
 }
 

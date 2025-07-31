@@ -2,6 +2,7 @@ package com.example.dairemote_app.utils
 
 import android.os.Build
 import com.example.dairemote_app.HostSearchCallback
+import com.example.dairemote_app.viewmodels.ConnectionViewModel
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -18,8 +19,9 @@ private const val MAX_RETRIES = 3
 private const val INITIAL_RETRY_DELAY_MS = 500L
 private const val SOCKET_TIMEOUT_MS = 5000L
 
-class ConnectionManager(serverAddress: String) {
+class ConnectionManager(serverAddress: String, viewModel: ConnectionViewModel?) {
     private val executorService: ExecutorService
+    private lateinit var connectionViewModel: ConnectionViewModel
     private var hostName: String? = null
     private var hostAudioList: String? = null
     private var hostDisplayProfileList: String? = null
@@ -28,6 +30,9 @@ class ConnectionManager(serverAddress: String) {
     init {
         try {
             setServerAddress(InetAddress.getByName(serverAddress))
+            if (viewModel != null) {
+                connectionViewModel = viewModel
+            }
         } catch (ignored: Exception) {
         }
 
@@ -107,13 +112,17 @@ class ConnectionManager(serverAddress: String) {
         throw lastException ?: IllegalStateException("No exception recorded")
     }
 
+    fun connectToHost() {
+        sendData("Connection requested by ${getDeviceName()}", getInetAddress())
+    }
+
     fun initializeConnection(): Boolean {
         return runWithRetry(MAX_RETRIES) { attempt ->
             try {
                 val socketTimeout = SOCKET_TIMEOUT_MS * (attempt + 1)
                 getUDPSocket().soTimeout = socketTimeout.toInt()
 
-                sendData("Connection requested by ${getDeviceName()}", getInetAddress())
+                connectToHost()
                 waitForResponse(socketTimeout.toInt())
 
                 return@runWithRetry when (getServerResponse()?.lowercase()) {
@@ -121,22 +130,25 @@ class ConnectionManager(serverAddress: String) {
                         waitForApproval()
                         val approved = getServerResponse().equals("approved", ignoreCase = true)
                         if (approved) {
-                            shutdownHostSearchInBackground()
-                            ConnectionMonitor.getInstance(this)
+                            //shutdownHostSearchInBackground()
+                            ConnectionMonitor.getInstance(this, connectionViewModel)
                             setConnectionEstablished(true)
                         }
                         return approved
                     }
+
                     "approved" -> {
-                        shutdownHostSearchInBackground()
-                        ConnectionMonitor.getInstance(this)
+                        //shutdownHostSearchInBackground()
+                        ConnectionMonitor.getInstance(this, connectionViewModel)
                         setConnectionEstablished(true)
                         true
                     }
+
                     "declined" -> {
                         resetConnectionManager()
                         false
                     }
+
                     else -> throw IOException("Invalid server response ${getServerResponse()}")
                 }
             } catch (e: Exception) {
@@ -221,13 +233,13 @@ class ConnectionManager(serverAddress: String) {
         return true
     }
 
-/*    fun requestHostName(): Boolean {
-        if (hostRequester("HostName", "HOST Name", getInetAddress())) {
-            setHostName(getHostRequesterResponse())
-            return true
-        }
-        return false
-    }*/
+    /*    fun requestHostName(): Boolean {
+            if (hostRequester("HostName", "HOST Name", getInetAddress())) {
+                setHostName(getHostRequesterResponse())
+                return true
+            }
+            return false
+        }*/
 
     // Retrieve audio devices from host
     fun requestHostAudioDevices(): Boolean {
@@ -257,7 +269,7 @@ class ConnectionManager(serverAddress: String) {
 
     // Shutdown the connection
     fun shutdown() {
-        ConnectionMonitor.getInstance(this)?.shutDownHeartbeat()
+        ConnectionMonitor.getInstance(this, connectionViewModel)?.shutDownHeartbeat()
         sendHostMessage("Shutdown requested")
         try {
             Thread.sleep(75)
@@ -268,7 +280,7 @@ class ConnectionManager(serverAddress: String) {
         closeUDPSocket()
     }
 
-    private fun closeUDPSocket() {
+    fun closeUDPSocket() {
         if (!getUDPSocket().isClosed) {
             getUDPSocket().close()
         }

@@ -29,7 +29,6 @@ import android.widget.SeekBar.OnSeekBarChangeListener
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
-import androidx.appcompat.app.AlertDialog
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.core.view.GravityCompat
@@ -46,7 +45,6 @@ import com.example.dairemote_app.utils.BackspaceEditText
 import com.example.dairemote_app.utils.ConnectionMonitor
 import com.example.dairemote_app.utils.DisplayProfilesRecyclerAdapter
 import com.example.dairemote_app.utils.KeyboardToolbar
-import com.example.dairemote_app.utils.TutorialMediator
 import com.example.dairemote_app.viewmodels.ConnectionViewModel
 import java.net.SocketException
 
@@ -99,21 +97,16 @@ class InteractionFragment : Fragment() {
     private val mouseSensitivity = 1f
     private var initialPointerCount = 0
 
-    private fun startHome(message: String?) {
-        // Remove listener before navigating away
-        keyboardLayoutListener?.let {
-            binding.root.viewTreeObserver.removeOnGlobalLayoutListener(it)
-        }
-        keyboardLayoutListener = null
+    private fun connectionLossHandler(message: String?) {
+        cleanUp()
 
-        viewModel.updateConnectionState(false)
         Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
         findNavController().navigate(R.id.action_to_main)
     }
 
     fun messageHost(message: String) {
-        if (!viewModel.connectionManager?.sendHostMessage(message)!!) {
-            startHome("Connection lost")
+        if (!viewModel.messageHost(message)) {
+            connectionLossHandler("Connection lost")
         }
     }
 
@@ -122,7 +115,7 @@ class InteractionFragment : Fragment() {
         viewModel = ViewModelProvider(requireActivity())[ConnectionViewModel::class.java]
 
         viewModel.connectionManager.let {
-            connectionMonitor = it?.let { it1 -> ConnectionMonitor.getInstance(it1) }
+            connectionMonitor = it?.let { it1 -> ConnectionMonitor.getInstance(it1, viewModel) }
         }
     }
 
@@ -167,18 +160,17 @@ class InteractionFragment : Fragment() {
             )
         displayRecyclerViewOptions.setAdapter(displayProfilesRecyclerAdapter)
 
-        val tutorial = TutorialMediator.GetInstance(AlertDialog.Builder(requireContext()))
-        if (tutorial != null) {
-            if (tutorial.tutorialOn) {
-                tutorial.showNextStep()
-            }
-        }
+        /*        val tutorial = TutorialMediator.GetInstance(AlertDialog.Builder(requireContext()))
+                if (tutorial != null) {
+                    if (tutorial.tutorialOn) {
+                        tutorial.showNextStep()
+                    }
+                }*/
 
         setupViews()
     }
 
     private fun setupViews() {
-        setupConnectionMonitoring(5000)
         setupTouchControls()
         setupKeyboard()
         setupBackPressHandler()
@@ -186,13 +178,17 @@ class InteractionFragment : Fragment() {
         setupAudioObservers()
         setupDisplayControls()
         setupManualDisconnect()
+
+        viewModel.connectionState.observe(viewLifecycleOwner) { isConnected ->
+            if (!isConnected) {
+                connectionLossHandler("Connection lost")
+            }
+        }
     }
 
     private fun setupConnectionMonitoring(delay: Int) {
-        connectionMonitor = viewModel.connectionManager?.let { ConnectionMonitor.getInstance(it) }
-        if (!connectionMonitor?.isHeartbeatRunning()!!) {
-            connectionMonitor!!.startHeartbeat(delay)
-        }
+        connectionMonitor = viewModel.connectionManager?.let { ConnectionMonitor.getInstance(it, viewModel) }
+        connectionMonitor!!.startHeartbeat(delay)
     }
 
     private fun setupBackPressHandler() {
@@ -368,7 +364,7 @@ class InteractionFragment : Fragment() {
                 if (it.error != null) {
                     Toast.makeText(requireContext(), it.error, Toast.LENGTH_SHORT).show()
                     if (it.error == "Connection lost") {
-                        startHome("Connection lost")
+                        connectionLossHandler("Connection lost")
                     }
                     return@observe
                 }
@@ -403,28 +399,22 @@ class InteractionFragment : Fragment() {
     }
 
     private fun setAudioDeviceDefault(defaultDevice: String) {
-        audioRecyclerAdapter.SetSelectedPosition(defaultDevice)
+        audioRecyclerAdapter.setSelectedPosition(defaultDevice)
     }
 
     private fun setupAudioControls() {
         // Initialize views using view binding
         binding.audiocycle.setOnClickListener {
-            viewModel.connectionManager?.getConnectionEstablished().let { isConnected ->
-                if (isConnected == true) {
-                    if (audioControlPanel.visibility == View.GONE) {
-                        hideDisplayProfilesList()
-                        audioControlPanel.visibility = View.VISIBLE
-                        try {
-                            requestAudioDevices()
-                        } catch (e: SocketException) {
-                            throw RuntimeException(e)
-                        }
-                    } else {
-                        hideAudioControlPanel()
-                    }
-                } else {
-                    startHome("Connection lost")
+            if (audioControlPanel.visibility == View.GONE) {
+                hideDisplayProfilesList()
+                audioControlPanel.visibility = View.VISIBLE
+                try {
+                    requestAudioDevices()
+                } catch (e: SocketException) {
+                    throw RuntimeException(e)
                 }
+            } else {
+                hideAudioControlPanel()
             }
         }
 
@@ -513,7 +503,8 @@ class InteractionFragment : Fragment() {
 
         editText.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_DONE ||
-                (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)) {
+                (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+            ) {
                 if (!toolbar.getModifierToggled()) {
                     messageHost("KEYBOARD_WRITE {ENTER}")
                 }
@@ -614,17 +605,13 @@ class InteractionFragment : Fragment() {
 
         // 2. Keyboard button click handler
         binding.keyboardImgBtn.setOnClickListener {
-            if (viewModel.connectionManager?.getConnectionEstablished() == true) {
-                hideAudioControlPanel()
-                hideDisplayProfilesList()
+            hideAudioControlPanel()
+            hideDisplayProfilesList()
 
-                editText.run {
-                    visibility = View.VISIBLE
-                    isCursorVisible = false
-                    requestFocus()
-                }
-            } else {
-                startHome("Connection lost")
+            editText.run {
+                visibility = View.VISIBLE
+                isCursorVisible = false
+                requestFocus()
             }
         }
 
@@ -659,42 +646,41 @@ class InteractionFragment : Fragment() {
         binding.disconnectHost.setOnClickListener {
             if (viewModel.connectionManager?.getConnectionEstablished() == true) {
                 viewModel.connectionManager?.shutdown()
-                viewModel.updateConnectionState(false)
-                startHome("Disconnected from host")
             }
+            connectionLossHandler("Disconnected from host")
         }
     }
 
-    private fun interactionTutorial() {
-        /*interactionHelp.setOnClickListener {
-            val builder = AlertDialog.Builder(this@InteractionPage)
-            val tutorial = TutorialMediator.GetInstance(builder)
-            if (interactionsHelpText.getVisibility() == View.VISIBLE) {
-                interactionsHelpText.setVisibility(View.GONE) // Hide the TextView
-            } else {
-                interactionsHelpText.setVisibility(View.VISIBLE) // Show the TextView
+    /*    private fun interactionTutorial() {
+            interactionHelp.setOnClickListener {
+                val builder = AlertDialog.Builder(this@InteractionPage)
+                val tutorial = TutorialMediator.GetInstance(builder)
+                if (interactionsHelpText.getVisibility() == View.VISIBLE) {
+                    interactionsHelpText.setVisibility(View.GONE) // Hide the TextView
+                } else {
+                    interactionsHelpText.setVisibility(View.VISIBLE) // Show the TextView
 
-                if (startTutorial.getVisibility() != View.VISIBLE) {
-                    startTutorial.setVisibility(View.VISIBLE) // Show clickable TextView for starting tutorial
-                    startTutorial.setOnClickListener(View.OnClickListener { // Hide after clicked
-                        startTutorial.setVisibility(View.GONE)
+                    if (startTutorial.getVisibility() != View.VISIBLE) {
+                        startTutorial.setVisibility(View.VISIBLE) // Show clickable TextView for starting tutorial
+                        startTutorial.setOnClickListener(View.OnClickListener { // Hide after clicked
+                            startTutorial.setVisibility(View.GONE)
 
-                        // Initiate tutorial starting at remote page steps
-                        tutorial.tutorialOn = true
-                        tutorial.currentStep = 0
-                        val intent = Intent(this@InteractionPage, ServersPage::class.java)
-                        startActivity(intent)
-                        tutorial.showNextStep()
-                    })
+                            // Initiate tutorial starting at remote page steps
+                            tutorial.tutorialOn = true
+                            tutorial.currentStep = 0
+                            val intent = Intent(this@InteractionPage, ServersPage::class.java)
+                            startActivity(intent)
+                            tutorial.showNextStep()
+                        })
+                    }
+
+                    // Cancel any existing hide callbacks
+                    handler.removeCallbacks(HideStartTutorial)
+                    // Hide the button automatically after a delay
+                    handler.postDelayed(HideStartTutorial, 2500)
                 }
-
-                // Cancel any existing hide callbacks
-                handler.removeCallbacks(HideStartTutorial)
-                // Hide the button automatically after a delay
-                handler.postDelayed(HideStartTutorial, 2500)
             }
         }*/
-    }
 
     private fun setupDisplayControls() {
         binding.displays.setOnClickListener {
@@ -720,7 +706,7 @@ class InteractionFragment : Fragment() {
 
                 is com.example.dairemote_app.viewmodels.Result.Error -> {
                     if (result.message == "Connection lost") {
-                        startHome(result.message)
+                        connectionLossHandler(result.message)
                     } else {
                         Toast.makeText(requireContext(), result.message, Toast.LENGTH_SHORT).show()
                         updateDisplayProfiles(listOf("Failed to load profiles"))
@@ -730,17 +716,38 @@ class InteractionFragment : Fragment() {
         }
     }
 
-    override fun onDestroyView() {
-        // Remove the listener when the view is destroyed
+    private fun releaseVibrator() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (requireContext().getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager?)?.defaultVibrator?.cancel()
+        } else {
+            @Suppress("DEPRECATION")
+            (requireContext().getSystemService(Context.VIBRATOR_SERVICE) as Vibrator?)?.cancel()
+        }
+    }
+
+    private fun cleanUp() {
         keyboardLayoutListener?.let {
             binding.root.viewTreeObserver.removeOnGlobalLayoutListener(it)
         }
         keyboardLayoutListener = null
 
-        super.onDestroyView()
+        releaseVibrator()
+
+        viewModel.audioState.removeObservers(viewLifecycleOwner)
+        viewModel.displayProfiles.removeObservers(viewLifecycleOwner)
+        viewModel.connectionState.removeObservers(viewLifecycleOwner)
+        viewModel.updateConnectionState(false)
+        viewModel.connectionManager?.setConnectionEstablished(false)
+
         connectionMonitor?.shutDownHeartbeat()
         handler.removeCallbacksAndMessages(null)
         _binding = null
+    }
+
+    override fun onDestroyView() {
+        cleanUp()
+
+        super.onDestroyView()
     }
 
     private fun clearEditText() {
@@ -750,9 +757,7 @@ class InteractionFragment : Fragment() {
         editText.clearFocus()
     }
 
-    // This is used in styles but does not count as a usage for some reason
-    // DO NOT DELETE
-    fun extraToolbarOnClick(view: View) {
+    private fun extraToolbarOnClick(view: View) {
         val viewID = view.id
         var msg = ""
         var audio = false
@@ -782,7 +787,7 @@ class InteractionFragment : Fragment() {
 
             // If this modifier was already active, deactivate all
             if (wasAlreadyActive) {
-                if(toolbar.getKeyCombination().isNotEmpty()) {
+                if (toolbar.getKeyCombination().isNotEmpty()) {
                     toolbar.addParentheses()
                     messageHost("KEYBOARD_WRITE ${toolbar.getKeyCombination()}")
                 }
@@ -805,12 +810,17 @@ class InteractionFragment : Fragment() {
         // Find which button was pressed
         for (i in 0..11) {
             val buttons =
-                if (toolbar.getCurrentToolbarPage() == 0) toolbar.getButtons(0) else toolbar.getButtons(1)
+                if (toolbar.getCurrentToolbarPage() == 0) toolbar.getButtons(0) else toolbar.getButtons(
+                    1
+                )
             if (viewID == buttons[i].id) {
                 if (toolbar.getCurrentToolbarPage() == 0 && (i == 6 || i == 7 || i == 8)) {
                     audio = true
                 }
-                msg = if (toolbar.getCurrentToolbarPage() == 0) toolbar.getKeys(0)[i] else toolbar.getKeys(1)[i]
+                msg =
+                    if (toolbar.getCurrentToolbarPage() == 0) toolbar.getKeys(0)[i] else toolbar.getKeys(
+                        1
+                    )[i]
                 break
             }
         }
@@ -842,18 +852,14 @@ class InteractionFragment : Fragment() {
         editText.setText("")
     }
 
-    override fun onPause() {
-        if (connectionMonitor?.isHeartbeatRunning() == true) {
-            connectionMonitor!!.shutDownHeartbeat()
-        }
-        super.onPause()
+    override fun onStart() {
+        super.onStart()
+        setupConnectionMonitoring(5000)
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (!connectionMonitor?.isHeartbeatRunning()!!) {
-            connectionMonitor!!.startHeartbeat()
-        }
+    override fun onStop() {
+        super.onStop()
+        connectionMonitor?.shutDownHeartbeat()
     }
 
     private fun hideAudioControlPanel() {
@@ -872,7 +878,7 @@ class InteractionFragment : Fragment() {
     }
 
     private fun cycleAudioDevice() {
-        audioRecyclerAdapter.CyclePosition()
+        audioRecyclerAdapter.cyclePosition()
     }
 
     private fun requestDisplayProfiles() {
